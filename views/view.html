@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Viewing Screen</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="view-body">
+  <div class="view-container" id="viewContainer">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div class="status-message" id="statusMessage">Waiting for the sharer to start...</div>
+
+    <div class="end-call-bar" id="endCallBar">
+      <button id="endCallBtn" class="btn btn-danger">End Call</button>
+    </div>
+  </div>
+
+  <script src="/js/view.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "screen-share-app",
+  "version": "1.0.0",
+  "description": "Simple screen sharing app using Express + WebSocket (WebRTC signaling)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}
