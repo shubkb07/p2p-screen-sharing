@@ -1,154 +1,102 @@
-(function () {
-  const code = window.location.pathname.split('/').pop().toUpperCase();
+(async function () {
+  const code = location.pathname.split('/').pop().toUpperCase();
+  const localVideo = document.getElementById('localVideo');
+  const overlay = document.getElementById('blackOverlay');
+  const stopBtn = document.getElementById('stopBtn');
+  const shareBtn = document.getElementById('resumeShareBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const status = document.getElementById('shareStatus');
+  const viewerCount = document.getElementById('viewerCount');
+  const audioInput = document.getElementById('shareAudio');
   document.getElementById('codeText').textContent = code;
 
-  const localVideo = document.getElementById('localVideo');
-  const blackOverlay = document.getElementById('blackOverlay');
-  const stopBtn = document.getElementById('stopBtn');
-  const resumeShareBtn = document.getElementById('resumeShareBtn');
-  const copyBtn = document.getElementById('copyBtn');
-
-  let localStream = null;
+  let stream = null;
   let ws = null;
-  const peers = new Map(); // viewerId -> RTCPeerConnection
+  let reconnectTimer = null;
+  let stopped = false;
+  let rtcConfig = { iceServers: [] };
+  const peers = new Map();
+  const pendingIce = new Map();
 
-  const rtcConfig = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  };
+  try { rtcConfig = await fetch('/api/rtc-config').then((r) => r.json()); } catch { status.textContent = 'Could not load network configuration'; }
 
-  function connectWS() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}`);
+  function send(message) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
+  function updateCount() { viewerCount.textContent = `${peers.size} viewer${peers.size === 1 ? '' : 's'}`; }
+  function closePeer(id) { peers.get(id)?.close(); peers.delete(id); pendingIce.delete(id); updateCount(); }
 
-    ws.addEventListener('open', () => {
-      ws.send(JSON.stringify({ type: 'join', role: 'share', code }));
-    });
-
-    ws.addEventListener('message', async (event) => {
-      const data = JSON.parse(event.data);
-      switch (data.type) {
-        case 'viewer-joined':
-          await createOfferForViewer(data.viewerId);
-          break;
-        case 'answer':
-          await handleAnswer(data.viewerId, data.sdp);
-          break;
-        case 'ice-candidate':
-          await handleRemoteIce(data.viewerId, data.candidate);
-          break;
-        case 'viewer-left':
-          closePeer(data.viewerId);
-          break;
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      setTimeout(connectWS, 2000);
-    });
-  }
-
-  async function createOfferForViewer(viewerId) {
-    if (!localStream) return; // nothing to share yet, ignore until sharing starts
-
-    closePeer(viewerId);
+  async function offer(id) {
+    if (!stream || !id) return;
+    closePeer(id);
     const pc = new RTCPeerConnection(rtcConfig);
-    peers.set(viewerId, pc);
-
-    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate, viewerId }));
-      }
+    peers.set(id, pc); updateCount();
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    pc.onicecandidate = ({ candidate }) => { if (candidate) send({ type: 'ice-candidate', candidate, viewerId: id }); };
+    pc.onconnectionstatechange = () => {
+      if (['failed', 'closed'].includes(pc.connectionState)) closePeer(id);
+      else if (pc.connectionState === 'connected') status.textContent = 'Sharing securely';
     };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    ws.send(JSON.stringify({ type: 'offer', sdp: offer, viewerId }));
+    await pc.setLocalDescription(await pc.createOffer());
+    send({ type: 'offer', sdp: pc.localDescription, viewerId: id });
   }
 
-  async function handleAnswer(viewerId, sdp) {
-    const pc = peers.get(viewerId);
-    if (pc) await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  async function onMessage(event) {
+    let data; try { data = JSON.parse(event.data); } catch { return; }
+    try {
+      if (data.type === 'viewer-joined') await offer(data.viewerId);
+      else if (data.type === 'answer') {
+        const pc = peers.get(data.viewerId); if (!pc) return;
+        await pc.setRemoteDescription(data.sdp);
+        for (const candidate of pendingIce.get(data.viewerId) || []) await pc.addIceCandidate(candidate);
+        pendingIce.delete(data.viewerId);
+      } else if (data.type === 'ice-candidate') {
+        const pc = peers.get(data.viewerId); if (!pc) return;
+        if (pc.remoteDescription) await pc.addIceCandidate(data.candidate);
+        else pendingIce.set(data.viewerId, [...(pendingIce.get(data.viewerId) || []), data.candidate]);
+      } else if (data.type === 'viewer-left') closePeer(data.viewerId);
+      else if (data.type === 'error') status.textContent = data.message;
+    } catch (error) { console.error('Signaling error', error); status.textContent = 'Connection negotiation failed'; }
   }
 
-  async function handleRemoteIce(viewerId, candidate) {
-    const pc = peers.get(viewerId);
-    if (pc && candidate) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (e) {
-        /* ignore */
-      }
-    }
-  }
-
-  function closePeer(viewerId) {
-    const pc = peers.get(viewerId);
-    if (pc) {
-      pc.close();
-      peers.delete(viewerId);
-    }
+  function connect() {
+    clearTimeout(reconnectTimer);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+    ws.onopen = () => { status.textContent = stream ? 'Ready for viewers' : 'Choose a screen to begin'; send({ type: 'join', role: 'share', code }); };
+    ws.onmessage = onMessage;
+    ws.onclose = () => { if (!stopped) { status.textContent = 'Reconnecting…'; reconnectTimer = setTimeout(connect, 1500); } };
   }
 
   async function startShare() {
+    if (!navigator.mediaDevices?.getDisplayMedia) { status.textContent = 'Screen sharing is not supported by this browser'; return; }
     try {
-      localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      localVideo.srcObject = localStream;
-      blackOverlay.style.display = 'none';
-      localVideo.style.display = 'block';
-
-      // Fires when the user stops sharing via the browser's own UI
-      localStream.getVideoTracks()[0].addEventListener('ended', () => {
-        stopShare();
+      const next = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: Boolean(audioInput.checked),
       });
-
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resume-share' }));
-      }
-    } catch (err) {
-      console.error('Error starting screen share', err);
+      stopShare(false);
+      stream = next; localVideo.srcObject = stream;
+      localVideo.hidden = false; overlay.hidden = true; stopBtn.disabled = false;
+      stream.getVideoTracks()[0].addEventListener('ended', () => stopShare(true), { once: true });
+      status.textContent = 'Ready for viewers'; send({ type: 'resume-share' });
+    } catch (error) {
+      status.textContent = error.name === 'NotAllowedError' ? 'Screen selection was cancelled' : `Could not share: ${error.message}`;
     }
   }
 
-  function stopShare() {
-    if (localStream) {
-      localStream.getTracks().forEach((t) => t.stop());
-      localStream = null;
-    }
-    localVideo.srcObject = null;
-    localVideo.style.display = 'none';
-    blackOverlay.style.display = 'flex';
-
-    peers.forEach((pc) => pc.close());
-    peers.clear();
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'stop-share' }));
-    }
+  function stopShare(notify = true) {
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    stream = null; localVideo.srcObject = null; localVideo.hidden = true;
+    overlay.hidden = false; stopBtn.disabled = true;
+    [...peers.keys()].forEach(closePeer);
+    status.textContent = 'Sharing stopped'; if (notify) send({ type: 'stop-share' });
   }
 
-  stopBtn.addEventListener('click', stopShare);
-  resumeShareBtn.addEventListener('click', startShare);
-
-  copyBtn.addEventListener('click', () => {
-    const link = `${window.location.origin}/view/${code}`;
-    navigator.clipboard
-      .writeText(link)
-      .then(() => {
-        const original = copyBtn.textContent;
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => (copyBtn.textContent = original), 1500);
-      })
-      .catch(() => {
-        prompt('Copy this link:', link);
-      });
+  shareBtn.addEventListener('click', startShare);
+  stopBtn.addEventListener('click', () => stopShare(true));
+  copyBtn.addEventListener('click', async () => {
+    const link = `${location.origin}/view/${code}`;
+    try { await navigator.clipboard.writeText(link); copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy viewer link'; }, 1500); }
+    catch { window.prompt('Copy this link:', link); }
   });
-
-  window.addEventListener('beforeunload', () => {
-    if (localStream) localStream.getTracks().forEach((t) => t.stop());
-  });
-
-  connectWS();
-  startShare();
+  addEventListener('beforeunload', () => { stopped = true; clearTimeout(reconnectTimer); stream?.getTracks().forEach((track) => track.stop()); });
+  connect();
 })();

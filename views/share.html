@@ -13,18 +13,19 @@
         <span class="code-label">Meeting Code</span>
         <span id="codeText" class="code-value"></span>
       </div>
-      <button id="copyBtn" class="btn btn-outline">Copy Link</button>
+      <div class="top-actions"><span id="viewerCount">0 viewers</span><button id="copyBtn" class="btn btn-outline">Copy viewer link</button></div>
     </div>
 
     <div class="video-wrapper" id="videoWrapper">
       <video id="localVideo" autoplay muted playsinline></video>
       <div class="black-overlay" id="blackOverlay">
-        <button id="resumeShareBtn" class="btn btn-primary">Share Screen</button>
+        <div class="share-prompt"><p>Choose what you want viewers to see</p><label><input id="shareAudio" type="checkbox"> Share system audio (when supported)</label><button id="resumeShareBtn" class="btn btn-primary">Choose screen</button></div>
       </div>
     </div>
 
     <div class="controls">
-      <button id="stopBtn" class="btn btn-danger">Stop Share</button>
+      <span id="shareStatus" class="connection-status">Connecting…</span>
+      <button id="stopBtn" class="btn btn-danger" disabled>Stop sharing</button>
     </div>
   </div>
 

@@ -1,177 +1,123 @@
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
 const path = require('path');
 const crypto = require('crypto');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-// ---------- Routes ----------
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'index.html'));
-});
-
-app.get('/share/:code', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'share.html'));
-});
-
-app.get('/view/:code', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'view.html'));
-});
-
-// ---------- Room / Signaling state ----------
-// rooms: Map<code, { sharer: WebSocket|null, viewers: Map<viewerId, WebSocket> }>
+const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 });
 const rooms = new Map();
 
-function getRoom(code) {
-  if (!rooms.has(code)) {
-    rooms.set(code, { sharer: null, viewers: new Map() });
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'display-capture=(self), fullscreen=(self)',
+    'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+  });
+  next();
+});
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'views', 'index.html')));
+app.get('/share/:code', (_req, res) => res.sendFile(path.join(__dirname, 'views', 'share.html')));
+app.get('/view/:code', (_req, res) => res.sendFile(path.join(__dirname, 'views', 'view.html')));
+app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/rtc-config', (_req, res) => {
+  let iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+  if (process.env.ICE_SERVERS) {
+    try {
+      const configured = JSON.parse(process.env.ICE_SERVERS);
+      if (Array.isArray(configured) && configured.length) iceServers = configured;
+    } catch (error) {
+      console.error('ICE_SERVERS must be a JSON array:', error.message);
+    }
   }
-  return rooms.get(code);
+  res.set('Cache-Control', 'no-store').json({ iceServers });
+});
+
+function validCode(code) {
+  return typeof code === 'string' && /^[A-Z0-9]{6,12}$/.test(code);
 }
 
-function cleanupRoomIfEmpty(code) {
-  const room = rooms.get(code);
-  if (room && !room.sharer && room.viewers.size === 0) {
-    rooms.delete(code);
-  }
+function send(ws, message) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
 
-function genId() {
-  return crypto.randomBytes(6).toString('hex');
-}
-
-function safeSend(ws, obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
+function leave(ws) {
+  if (!ws.code) return;
+  const room = rooms.get(ws.code);
+  if (!room) return;
+  if (ws.role === 'share' && room.sharer === ws) {
+    room.sharer = null;
+    for (const viewer of room.viewers.values()) send(viewer, { type: 'sharer-left' });
+  } else if (ws.role === 'view' && room.viewers.delete(ws.id)) {
+    send(room.sharer, { type: 'viewer-left', viewerId: ws.id });
   }
+  if (!room.sharer && room.viewers.size === 0) rooms.delete(ws.code);
+  ws.code = null;
+  ws.role = null;
 }
 
 wss.on('connection', (ws) => {
-  ws.id = genId();
-  ws.role = null; // 'share' | 'view'
-  ws.code = null;
+  ws.id = crypto.randomBytes(12).toString('hex');
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
+    try { data = JSON.parse(raw.toString()); } catch { return send(ws, { type: 'error', message: 'Invalid message' }); }
+
+    if (data.type === 'join') {
+      const code = String(data.code || '').toUpperCase();
+      if (!validCode(code) || !['share', 'view'].includes(data.role)) return send(ws, { type: 'error', message: 'Invalid room request' });
+      leave(ws);
+      let room = rooms.get(code);
+      if (!room) { room = { sharer: null, viewers: new Map() }; rooms.set(code, room); }
+      if (data.role === 'share') {
+        if (room.sharer && room.sharer.readyState === WebSocket.OPEN) return send(ws, { type: 'error', message: 'This room already has a sharer' });
+        ws.role = 'share'; ws.code = code; room.sharer = ws;
+        send(ws, { type: 'joined', role: 'share', viewerCount: room.viewers.size });
+        for (const viewerId of room.viewers.keys()) send(ws, { type: 'viewer-joined', viewerId });
+      } else {
+        ws.role = 'view'; ws.code = code; room.viewers.set(ws.id, ws);
+        send(ws, { type: 'joined', role: 'view' });
+        room.sharer ? send(room.sharer, { type: 'viewer-joined', viewerId: ws.id }) : send(ws, { type: 'sharer-unavailable' });
+      }
       return;
     }
 
-    switch (data.type) {
-      // A client (sharer or viewer) joins a room
-      case 'join': {
-        const { role, code } = data;
-        if (!code || !/^[A-Z0-9]{6}$/.test(code)) {
-          safeSend(ws, { type: 'error', message: 'Invalid meeting code' });
-          return;
-        }
-
-        ws.role = role;
-        ws.code = code;
-        const room = getRoom(code);
-
-        if (role === 'share') {
-          room.sharer = ws;
-          // Tell the sharer about viewers who are already waiting
-          for (const viewerId of room.viewers.keys()) {
-            safeSend(ws, { type: 'viewer-joined', viewerId });
-          }
-        } else if (role === 'view') {
-          ws.viewerId = ws.id;
-          room.viewers.set(ws.id, ws);
-          if (room.sharer) {
-            safeSend(room.sharer, { type: 'viewer-joined', viewerId: ws.id });
-          } else {
-            safeSend(ws, { type: 'sharer-unavailable' });
-          }
-        }
-        break;
-      }
-
-      // Sharer -> specific viewer
-      case 'offer': {
-        const room = rooms.get(ws.code);
-        if (!room) return;
-        const viewerWs = room.viewers.get(data.viewerId);
-        safeSend(viewerWs, { type: 'offer', sdp: data.sdp, viewerId: data.viewerId });
-        break;
-      }
-
-      // Viewer -> sharer
-      case 'answer': {
-        const room = rooms.get(ws.code);
-        if (!room) return;
-        safeSend(room.sharer, { type: 'answer', sdp: data.sdp, viewerId: ws.viewerId });
-        break;
-      }
-
-      // Either side -> the other side of a specific pair
-      case 'ice-candidate': {
-        const room = rooms.get(ws.code);
-        if (!room) return;
-        if (ws.role === 'share') {
-          const viewerWs = room.viewers.get(data.viewerId);
-          safeSend(viewerWs, { type: 'ice-candidate', candidate: data.candidate, viewerId: data.viewerId });
-        } else if (ws.role === 'view') {
-          safeSend(room.sharer, { type: 'ice-candidate', candidate: data.candidate, viewerId: ws.viewerId });
-        }
-        break;
-      }
-
-      // Sharer paused sharing -> tell all viewers
-      case 'stop-share': {
-        const room = rooms.get(ws.code);
-        if (!room) return;
-        for (const viewerWs of room.viewers.values()) {
-          safeSend(viewerWs, { type: 'share-stopped' });
-        }
-        break;
-      }
-
-      // Sharer resumed sharing -> re-trigger offer flow for existing viewers
-      case 'resume-share': {
-        const room = rooms.get(ws.code);
-        if (!room) return;
-        for (const viewerId of room.viewers.keys()) {
-          safeSend(ws, { type: 'viewer-joined', viewerId });
-        }
-        break;
-      }
-
-      default:
-        break;
-    }
-  });
-
-  ws.on('close', () => {
-    if (!ws.code) return;
+    if (!ws.code || !ws.role) return send(ws, { type: 'error', message: 'Join a room first' });
     const room = rooms.get(ws.code);
     if (!room) return;
-
-    if (ws.role === 'share' && room.sharer === ws) {
-      room.sharer = null;
-      for (const viewerWs of room.viewers.values()) {
-        safeSend(viewerWs, { type: 'sharer-left' });
-      }
-    } else if (ws.role === 'view') {
-      room.viewers.delete(ws.id);
-      if (room.sharer) {
-        safeSend(room.sharer, { type: 'viewer-left', viewerId: ws.id });
-      }
+    if (data.type === 'offer' && ws.role === 'share' && typeof data.viewerId === 'string') {
+      send(room.viewers.get(data.viewerId), { type: 'offer', sdp: data.sdp });
+    } else if (data.type === 'answer' && ws.role === 'view') {
+      send(room.sharer, { type: 'answer', sdp: data.sdp, viewerId: ws.id });
+    } else if (data.type === 'ice-candidate') {
+      if (ws.role === 'share') send(room.viewers.get(data.viewerId), { type: 'ice-candidate', candidate: data.candidate });
+      else send(room.sharer, { type: 'ice-candidate', candidate: data.candidate, viewerId: ws.id });
+    } else if (data.type === 'stop-share' && ws.role === 'share') {
+      for (const viewer of room.viewers.values()) send(viewer, { type: 'share-stopped' });
+    } else if (data.type === 'resume-share' && ws.role === 'share') {
+      for (const viewerId of room.viewers.keys()) send(ws, { type: 'viewer-joined', viewerId });
     }
-
-    cleanupRoomIfEmpty(ws.code);
   });
+  ws.on('close', () => leave(ws));
+  ws.on('error', () => leave(ws));
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) { ws.terminate(); continue; }
+    ws.isAlive = false; ws.ping();
+  }
+}, 30000);
+heartbeat.unref();
+
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, () => console.log(`Screen share listening on http://localhost:${PORT}`));
+
+module.exports = { app, server };

@@ -3,34 +3,25 @@ document.addEventListener('DOMContentLoaded', () => {
   const joinBtn = document.getElementById('joinBtn');
   const codeInput = document.getElementById('codeInput');
 
-  function generateCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-      code += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return code;
+  function generateCode(length = 8) {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = crypto.getRandomValues(new Uint8Array(length));
+    return Array.from(bytes, (byte) => chars[byte % chars.length]).join('');
   }
 
-  startBtn.addEventListener('click', () => {
-    const code = generateCode();
-    window.location.href = `/share/${code}`;
-  });
-
+  startBtn.addEventListener('click', () => { window.location.href = `/share/${generateCode()}`; });
   joinBtn.addEventListener('click', () => {
     const code = codeInput.value.trim().toUpperCase();
-    if (!/^[A-Z0-9]{6}$/.test(code)) {
-      alert('Please enter a valid 6-character meeting code (letters and numbers).');
+    if (!/^[A-Z0-9]{6,12}$/.test(code)) {
+      codeInput.setCustomValidity('Enter a 6–12 character code.');
+      codeInput.reportValidity();
       return;
     }
     window.location.href = `/view/${code}`;
   });
-
   codeInput.addEventListener('input', () => {
-    codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    codeInput.setCustomValidity('');
+    codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
   });
-
-  codeInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') joinBtn.click();
-  });
+  codeInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') joinBtn.click(); });
 });

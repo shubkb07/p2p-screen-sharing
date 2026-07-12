@@ -1,118 +1,55 @@
-(function () {
-  const code = window.location.pathname.split('/').pop().toUpperCase();
-  const remoteVideo = document.getElementById('remoteVideo');
-  const statusMessage = document.getElementById('statusMessage');
-  const endCallBar = document.getElementById('endCallBar');
-  const endCallBtn = document.getElementById('endCallBtn');
+(async function () {
+  const code = location.pathname.split('/').pop().toUpperCase();
+  const video = document.getElementById('remoteVideo');
+  const status = document.getElementById('statusMessage');
+  const bar = document.getElementById('endCallBar');
+  let ws = null, pc = null, reconnectTimer = null, hideTimer = null;
+  let ended = false, pendingIce = [], rtcConfig = { iceServers: [] };
+  try { rtcConfig = await fetch('/api/rtc-config').then((r) => r.json()); } catch { showStatus('Could not load network configuration'); }
 
-  let ws = null;
-  let pc = null;
-  let myViewerId = null;
-
-  const rtcConfig = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  };
-
-  function connectWS() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}`);
-
-    ws.addEventListener('open', () => {
-      ws.send(JSON.stringify({ type: 'join', role: 'view', code }));
-    });
-
-    ws.addEventListener('message', async (event) => {
-      const data = JSON.parse(event.data);
-      switch (data.type) {
-        case 'offer':
-          myViewerId = data.viewerId;
-          await handleOffer(data.sdp);
-          break;
-        case 'ice-candidate':
-          if (pc && data.candidate) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-            } catch (e) {
-              /* ignore */
-            }
-          }
-          break;
-        case 'share-stopped':
-          showStatus('The sharer stopped sharing.');
-          clearVideo();
-          break;
-        case 'sharer-left':
-          showStatus('The sharer has left.');
-          clearVideo();
-          break;
-        case 'sharer-unavailable':
-          showStatus('Waiting for the sharer to start...');
-          break;
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      showStatus('Connection lost. Reconnecting...');
-      setTimeout(connectWS, 2000);
-    });
-  }
+  function send(message) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
+  function showStatus(message) { status.textContent = message; status.hidden = false; }
+  function clearPeer() { pc?.close(); pc = null; pendingIce = []; video.srcObject = null; }
 
   async function handleOffer(sdp) {
-    if (pc) pc.close();
-    pc = new RTCPeerConnection(rtcConfig);
-
-    pc.ontrack = (event) => {
-      remoteVideo.srcObject = event.streams[0];
-      hideStatus();
+    clearPeer(); pc = new RTCPeerConnection(rtcConfig);
+    pc.ontrack = ({ streams }) => { video.srcObject = streams[0]; status.hidden = true; video.play().catch(() => showStatus('Click anywhere to start playback')); };
+    pc.onicecandidate = ({ candidate }) => { if (candidate) send({ type: 'ice-candidate', candidate }); };
+    pc.onconnectionstatechange = () => {
+      if (pc?.connectionState === 'failed') showStatus('Peer connection failed. Check TURN configuration or retry.');
+      else if (pc?.connectionState === 'disconnected') showStatus('Connection interrupted…');
     };
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate }));
-      }
-    };
-
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
+    await pc.setRemoteDescription(sdp);
+    for (const candidate of pendingIce) await pc.addIceCandidate(candidate);
+    pendingIce = [];
+    await pc.setLocalDescription(await pc.createAnswer());
+    send({ type: 'answer', sdp: pc.localDescription });
   }
 
-  function clearVideo() {
-    remoteVideo.srcObject = null;
-    if (pc) {
-      pc.close();
-      pc = null;
-    }
+  async function onMessage(event) {
+    let data; try { data = JSON.parse(event.data); } catch { return; }
+    try {
+      if (data.type === 'offer') await handleOffer(data.sdp);
+      else if (data.type === 'ice-candidate' && data.candidate) {
+        if (pc?.remoteDescription) await pc.addIceCandidate(data.candidate); else pendingIce.push(data.candidate);
+      } else if (data.type === 'share-stopped') { clearPeer(); showStatus('The sharer stopped sharing. Waiting for them to resume…'); }
+      else if (data.type === 'sharer-left') { clearPeer(); showStatus('The sharer disconnected. Waiting for reconnection…'); }
+      else if (data.type === 'sharer-unavailable') showStatus('Waiting for the sharer to start…');
+      else if (data.type === 'error') showStatus(data.message);
+    } catch (error) { console.error('Signaling error', error); showStatus('Connection negotiation failed'); }
   }
 
-  function showStatus(msg) {
-    statusMessage.textContent = msg;
-    statusMessage.style.display = 'block';
-  }
-  function hideStatus() {
-    statusMessage.style.display = 'none';
-  }
-
-  endCallBtn.addEventListener('click', () => {
-    clearVideo();
-    if (ws) ws.close();
-    window.location.href = '/';
-  });
-
-  // Auto-hide the End Call bar after 5s of no mouse/touch activity
-  let hideTimeout = null;
-  function showControls() {
-    endCallBar.classList.add('visible');
-    clearTimeout(hideTimeout);
-    hideTimeout = setTimeout(() => {
-      endCallBar.classList.remove('visible');
-    }, 5000);
+  function connect() {
+    clearTimeout(reconnectTimer);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+    ws.onopen = () => { showStatus('Waiting for the secure peer connection…'); send({ type: 'join', role: 'view', code }); };
+    ws.onmessage = onMessage;
+    ws.onclose = () => { if (!ended) { clearPeer(); showStatus('Signaling disconnected. Reconnecting…'); reconnectTimer = setTimeout(connect, 1500); } };
   }
 
-  document.addEventListener('mousemove', showControls);
-  document.addEventListener('touchstart', showControls);
-  showControls();
-
-  connectWS();
+  document.getElementById('endCallBtn').addEventListener('click', () => { ended = true; clearTimeout(reconnectTimer); clearPeer(); ws?.close(); location.href = '/'; });
+  document.getElementById('fullscreenBtn').addEventListener('click', () => document.documentElement.requestFullscreen?.());
+  document.addEventListener('click', () => video.play().catch(() => {}));
+  function showControls() { bar.classList.add('visible'); clearTimeout(hideTimer); hideTimer = setTimeout(() => bar.classList.remove('visible'), 4000); }
+  document.addEventListener('pointermove', showControls); document.addEventListener('pointerdown', showControls); showControls(); connect();
 })();
