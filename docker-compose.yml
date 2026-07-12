@@ -1,0 +1,20 @@
+services:
+  p2p-screen-share:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p2p-screen-share
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8050:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Optional but recommended for reliable connections across restrictive networks.
+      # Put ICE_SERVERS in a .env file; see .env.example.
+      ICE_SERVERS: "${ICE_SERVERS:-}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

@@ -29,3 +29,40 @@ TURN relays only when a direct connection is unavailable. WebRTC media remains D
 - This is one-to-many P2P: the sharer's upload and CPU usage grows per viewer. For larger audiences, an SFU is the appropriate architecture.
 
 Environment variables: `PORT` (default `3000`) and `ICE_SERVERS` (JSON array of `RTCIceServer` objects).
+
+## VPS deployment with Docker and Nginx
+
+The included Compose setup publishes the application only on VPS loopback port `8050`; Nginx is the public entry point.
+
+```bash
+cd /docker/p2p
+docker compose up -d --build
+docker compose ps
+curl http://127.0.0.1:8050/health
+```
+
+Copy `deploy/nginx-p2p.shubkb.me.conf` to `/etc/nginx/sites-available/p2p.shubkb.me`, enable it, test Nginx, and reload:
+
+```bash
+sudo cp deploy/nginx-p2p.shubkb.me.conf /etc/nginx/sites-available/p2p.shubkb.me
+sudo ln -s /etc/nginx/sites-available/p2p.shubkb.me /etc/nginx/sites-enabled/p2p.shubkb.me
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+After the DNS `A`/`AAAA` record points at the VPS, obtain HTTPS with Certbot:
+
+```bash
+sudo certbot --nginx -d p2p.shubkb.me
+```
+
+Screen capture requires HTTPS outside localhost. Certbot updates the Nginx site to redirect HTTP to HTTPS while retaining the WebSocket proxy configuration.
+
+Useful operations:
+
+```bash
+cd /docker/p2p
+docker compose logs -f --tail=100
+docker compose restart
+git pull && docker compose up -d --build
+```
