@@ -243,6 +243,30 @@ body {
   color: #94a3b8;
   font-size: 16px;
   text-align: center;
+  pointer-events: none;
+}
+
+.playback-prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 10px 12px 10px 16px;
+  border: 1px solid rgba(148, 163, 184, .28);
+  border-radius: 12px;
+  background: rgba(30, 41, 59, .92);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .25);
+  color: #e2e8f0;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .playback-prompt { white-space: normal; width: calc(100vw - 32px); }
 }
 
 .end-call-bar {

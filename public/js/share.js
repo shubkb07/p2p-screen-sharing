@@ -24,17 +24,47 @@
   function updateCount() { viewerCount.textContent = `${peers.size} viewer${peers.size === 1 ? '' : 's'}`; }
   function closePeer(id) { peers.get(id)?.close(); peers.delete(id); pendingIce.delete(id); updateCount(); }
 
+  function preferScreenShareCodecs(transceiver) {
+    if (!transceiver?.setCodecPreferences || !RTCRtpSender.getCapabilities) return;
+    const codecs = RTCRtpSender.getCapabilities('video')?.codecs || [];
+    const order = ['video/VP9', 'video/AV1', 'video/H264', 'video/VP8'];
+    const ranked = codecs.slice().sort((a, b) => {
+      const aRank = order.indexOf(a.mimeType);
+      const bRank = order.indexOf(b.mimeType);
+      return (aRank < 0 ? order.length : aRank) - (bRank < 0 ? order.length : bRank);
+    });
+    try { transceiver.setCodecPreferences(ranked); } catch (error) { console.warn('Could not set codec preference', error); }
+  }
+
+  async function optimizeVideoSender(sender) {
+    if (!sender || sender.track?.kind !== 'video') return;
+    const parameters = sender.getParameters();
+    parameters.degradationPreference = 'maintain-resolution';
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    Object.assign(parameters.encodings[0], {
+      maxBitrate: 12_000_000,
+      maxFramerate: 30,
+      scaleResolutionDownBy: 1,
+    });
+    try { await sender.setParameters(parameters); } catch (error) { console.warn('Could not apply high-quality sender settings', error); }
+  }
+
   async function offer(id) {
     if (!stream || !id) return;
     closePeer(id);
     const pc = new RTCPeerConnection(rtcConfig);
     peers.set(id, pc); updateCount();
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    const senders = stream.getTracks().map((track) => {
+      const sender = pc.addTrack(track, stream);
+      if (track.kind === 'video') preferScreenShareCodecs(pc.getTransceivers().find((item) => item.sender === sender));
+      return sender;
+    });
     pc.onicecandidate = ({ candidate }) => { if (candidate) send({ type: 'ice-candidate', candidate, viewerId: id }); };
     pc.onconnectionstatechange = () => {
       if (['failed', 'closed'].includes(pc.connectionState)) closePeer(id);
       else if (pc.connectionState === 'connected') status.textContent = 'Sharing securely';
     };
+    await Promise.all(senders.map(optimizeVideoSender));
     await pc.setLocalDescription(await pc.createOffer());
     send({ type: 'offer', sdp: pc.localDescription, viewerId: id });
   }
@@ -69,13 +99,21 @@
     if (!navigator.mediaDevices?.getDisplayMedia) { status.textContent = 'Screen sharing is not supported by this browser'; return; }
     try {
       const next = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        video: {
+          frameRate: { ideal: 30, max: 30 },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+          displaySurface: 'monitor',
+          logicalSurface: true,
+        },
         audio: Boolean(audioInput.checked),
       });
       stopShare(false);
       stream = next; localVideo.srcObject = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      if ('contentHint' in videoTrack) videoTrack.contentHint = 'detail';
       localVideo.hidden = false; overlay.hidden = true; stopBtn.disabled = false;
-      stream.getVideoTracks()[0].addEventListener('ended', () => stopShare(true), { once: true });
+      videoTrack.addEventListener('ended', () => stopShare(true), { once: true });
       status.textContent = 'Ready for viewers'; send({ type: 'resume-share' });
     } catch (error) {
       status.textContent = error.name === 'NotAllowedError' ? 'Screen selection was cancelled' : `Could not share: ${error.message}`;

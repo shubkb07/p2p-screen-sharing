@@ -10,6 +10,10 @@
   <div class="view-container" id="viewContainer">
     <video id="remoteVideo" autoplay playsinline></video>
     <div class="status-message" id="statusMessage">Waiting for the sharer to start...</div>
+    <div class="playback-prompt" id="playbackPrompt" hidden>
+      <span>Your browser needs permission to play this share.</span>
+      <button id="startPlaybackBtn" class="btn btn-primary" type="button">OK</button>
+    </div>
 
     <div class="end-call-bar" id="endCallBar">
       <button id="fullscreenBtn" class="btn btn-secondary">Fullscreen</button>
