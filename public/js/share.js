@@ -17,6 +17,8 @@
   let rtcConfig = { iceServers: [] };
   const peers = new Map();
   const pendingIce = new Map();
+  const MAX_VIDEO_BITRATE = 45_000_000;
+  const MAX_VIDEO_FRAMERATE = 60;
 
   try { rtcConfig = await fetch('/api/rtc-config').then((r) => r.json()); } catch { status.textContent = 'Could not load network configuration'; }
 
@@ -42,8 +44,10 @@
     parameters.degradationPreference = 'maintain-resolution';
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
     Object.assign(parameters.encodings[0], {
-      maxBitrate: 12_000_000,
-      maxFramerate: 30,
+      // This is a quality ceiling, not a fixed rate. WebRTC's congestion
+      // controller automatically sends less when the connection needs it.
+      maxBitrate: MAX_VIDEO_BITRATE,
+      maxFramerate: MAX_VIDEO_FRAMERATE,
       scaleResolutionDownBy: 1,
     });
     try { await sender.setParameters(parameters); } catch (error) { console.warn('Could not apply high-quality sender settings', error); }
@@ -100,9 +104,9 @@
     try {
       const next = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          frameRate: { ideal: 30, max: 30 },
-          width: { ideal: 2560 },
-          height: { ideal: 1440 },
+          frameRate: { ideal: MAX_VIDEO_FRAMERATE, max: MAX_VIDEO_FRAMERATE },
+          width: { ideal: 3840, max: 3840 },
+          height: { ideal: 2160, max: 2160 },
           displaySurface: 'monitor',
           logicalSurface: true,
         },
